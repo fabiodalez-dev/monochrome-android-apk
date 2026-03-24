@@ -33,10 +33,10 @@ git remote rename origin upstream
 
 # 2. Clone this overlay
 cd ..
-git clone https://github.com/fabiodalez/fabiodalez-music-android.git
+git clone https://github.com/fabiodalez-dev/Monochrome-Android-APK
 
 # 3. Install overlay into Monochrome
-cd fabiodalez-music-android
+cd Monochrome-Android-APK
 chmod +x install.sh
 ./install.sh ../monochrome
 
