@@ -99,6 +99,14 @@ echo "▶ Syncing to Android..."
 npx cap sync android 2>&1 | tail -2
 echo "  ✓ Synced."
 
+# ── 7b. Fix duplicate splash resources ──
+# Upstream ships splash.png, Capacitor sync generates splash.xml — Gradle fails on duplicates
+if [ -f "$PROJECT_DIR/android/app/src/main/res/drawable/splash.png" ] && \
+   [ -f "$PROJECT_DIR/android/app/src/main/res/drawable/splash.xml" ]; then
+    rm "$PROJECT_DIR/android/app/src/main/res/drawable/splash.png"
+    echo "  ✓ Removed duplicate splash.png (keeping splash.xml)."
+fi
+
 # ── 8. Build APK ──
 echo ""
 echo "▶ Building APK..."
