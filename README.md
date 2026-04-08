@@ -13,7 +13,8 @@ Android wrapper for [Monochrome](https://github.com/monochrome-music/monochrome)
 - **Local files** — Select Music Folder works on Android (native folder picker)
 - **OAuth** — Last.fm/Libre.fm authentication via Chrome Custom Tab
 - **Clipboard** — Copy to clipboard works natively
-- **Immersive mode** — Navigation bar hidden, status bar visible with safe area padding
+- **Bluetooth auto-pause** — Music pauses automatically when Bluetooth disconnects
+- **Full UI** — Navigation bar visible, status bar visible with safe area padding
 - **Back navigation** — Back button in header for album/artist/playlist navigation
 - **Branding** — "Fabiodalez Music" name, custom splash screen
 

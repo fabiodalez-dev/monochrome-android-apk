@@ -256,11 +256,6 @@ if (window.AndroidLocalFiles) {
         const { Capacitor, registerPlugin } = await import('@capacitor/core');
         if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
         AudioService = registerPlugin('AudioService');
-
-        // Hide navigation bar using the official Capacitor API (reinforces Java immersive mode)
-        const { SystemBars: SB, SystemBarType: SBT } = await import('@capacitor/core');
-        SB.hide({ bar: SBT.NavigationBar }).catch(() => {});
-        SB.setStyle({ style: 'DARK' }).catch(() => {});
     } catch { return; }
 
     // CSS: notch + notifications position
@@ -277,7 +272,7 @@ if (window.AndroidLocalFiles) {
         .track-item-details .artist { font-size: 0.85rem !important; }
         html {
             padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) !important;
-            padding-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) !important;
+            padding-bottom: 0 !important;
             background: #000 !important;
         }
         .main-header { gap: 4px !important; padding: 6px 8px !important; flex-wrap: nowrap !important; overflow: hidden !important; max-width: 100vw !important; box-sizing: border-box !important; }

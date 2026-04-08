@@ -160,18 +160,14 @@ public class MainActivity extends BridgeActivity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
-            hideNavBar();
+            setupSystemBars();
         }
     }
 
-    private void hideNavBar() {
-        // Hide only navigation bar, keep status bar visible
-        // Swipe up from bottom edge to temporarily reveal
+    private void setupSystemBars() {
+        // Keep navigation bar visible with transparent background
+        getWindow().setNavigationBarColor(android.graphics.Color.parseColor("#1a1a1a"));
         getWindow().getDecorView().setSystemUiVisibility(
-                android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        getWindow().setNavigationBarColor(android.graphics.Color.TRANSPARENT);
+                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 }

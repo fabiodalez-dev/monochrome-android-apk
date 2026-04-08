@@ -12,6 +12,7 @@
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:navigationBarColor">#1a1a1a</item>
     </style>
 
     <!-- Pre-Android 12 splash: just black background with logo drawable -->

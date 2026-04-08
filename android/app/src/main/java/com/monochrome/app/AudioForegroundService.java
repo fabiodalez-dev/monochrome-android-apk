@@ -5,10 +5,14 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
@@ -34,6 +38,7 @@ public class AudioForegroundService extends Service {
     public static final String ACTION_PREV = "com.monochrome.app.PREV";
 
     private MediaSessionCompat mediaSession;
+    private BroadcastReceiver noisyReceiver;
     private String currentTitle = "Fabiodalez Music";
     private String currentArtist = "Music";
     private Bitmap currentCover = null;
@@ -46,6 +51,28 @@ public class AudioForegroundService extends Service {
         super.onCreate();
         createNotificationChannel();
         setupMediaSession();
+        registerNoisyReceiver();
+    }
+
+    private void registerNoisyReceiver() {
+        noisyReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                    // Bluetooth/headphones disconnected — pause playback
+                    isPlaying = false;
+                    sendCommandToWebView("pause");
+                    updateMediaSessionState();
+                    updateNotification();
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(noisyReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(noisyReceiver, filter);
+        }
     }
 
     @Override
@@ -235,6 +262,10 @@ public class AudioForegroundService extends Service {
 
     @Override
     public void onDestroy() {
+        if (noisyReceiver != null) {
+            unregisterReceiver(noisyReceiver);
+            noisyReceiver = null;
+        }
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();

@@ -4,6 +4,9 @@ const config: CapacitorConfig = {
   appId: 'com.monochrome.app',
   appName: 'Fabiodalez Music',
   webDir: 'dist',
+  android: {
+    adjustMarginsForEdgeToEdge: 'auto',
+  },
   plugins: {
     SystemBars: {
       insetsHandling: 'css',
