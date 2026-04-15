@@ -19,6 +19,9 @@ import android.os.SystemClock;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
+import android.util.Log;
+import android.util.LruCache;
+import android.view.KeyEvent;
 
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
@@ -26,9 +29,13 @@ import androidx.media.app.NotificationCompat.MediaStyle;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class AudioForegroundService extends Service {
 
+    private static final String TAG = "AudioForegroundService";
     private static final String CHANNEL_ID = "monochrome_playback";
     private static final int NOTIFICATION_ID = 1;
 
@@ -42,9 +49,14 @@ public class AudioForegroundService extends Service {
     private String currentTitle = "Fabiodalez Music";
     private String currentArtist = "Music";
     private Bitmap currentCover = null;
+    private String currentCoverUrl = null;
     private boolean isPlaying = true;
     private long currentPosition = 0;
     private long currentDuration = 0;
+
+    // #33: Bounded thread pool + LRU cache for cover art
+    private static final ExecutorService DOWNLOAD_EXECUTOR = Executors.newFixedThreadPool(2);
+    private static final LruCache<String, Bitmap> COVER_CACHE = new LruCache<>(10);
 
     @Override
     public void onCreate() {
@@ -54,12 +66,13 @@ public class AudioForegroundService extends Service {
         registerNoisyReceiver();
     }
 
+    // #49: use RECEIVER_NOT_EXPORTED — noisy broadcast is system-originated,
+    // but keeping it unexported reduces attack surface (no third-party app can forge it).
     private void registerNoisyReceiver() {
         noisyReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
-                    // Bluetooth/headphones disconnected — pause playback
                     isPlaying = false;
                     sendCommandToWebView("pause");
                     updateMediaSessionState();
@@ -69,7 +82,7 @@ public class AudioForegroundService extends Service {
         };
         IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(noisyReceiver, filter, Context.RECEIVER_EXPORTED);
+            registerReceiver(noisyReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(noisyReceiver, filter);
         }
@@ -94,18 +107,34 @@ public class AudioForegroundService extends Service {
                 String artist = intent.getStringExtra("text");
                 String coverUrl = intent.getStringExtra("cover");
                 isPlaying = intent.getBooleanExtra("playing", true);
-                currentPosition = intent.getLongExtra("position", 0);
-                currentDuration = intent.getLongExtra("duration", 0);
+                currentPosition = Math.max(0, intent.getLongExtra("position", 0));
+                currentDuration = Math.max(0, intent.getLongExtra("duration", 0));
                 if (title != null) currentTitle = title;
                 if (artist != null) currentArtist = artist;
 
-                // Download cover art in background
+                // #33: cache-aware async cover download (no more new Thread per call)
                 if (coverUrl != null && !coverUrl.isEmpty()) {
-                    new Thread(() -> {
-                        currentCover = downloadBitmap(coverUrl);
-                        updateMediaSessionState();
-                        updateNotification();
-                    }).start();
+                    if (!coverUrl.equals(currentCoverUrl)) {
+                        currentCoverUrl = coverUrl;
+                        Bitmap cached = COVER_CACHE.get(coverUrl);
+                        if (cached != null) {
+                            currentCover = cached;
+                        } else {
+                            final String urlToFetch = coverUrl;
+                            DOWNLOAD_EXECUTOR.execute(() -> {
+                                Bitmap bmp = downloadBitmap(urlToFetch);
+                                if (bmp != null) {
+                                    COVER_CACHE.put(urlToFetch, bmp);
+                                    // Only update if the cover URL is still the current one
+                                    if (urlToFetch.equals(currentCoverUrl)) {
+                                        currentCover = bmp;
+                                        updateMediaSessionState();
+                                        updateNotification();
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -123,20 +152,32 @@ public class AudioForegroundService extends Service {
     }
 
     private Bitmap downloadBitmap(String urlStr) {
+        HttpURLConnection conn = null;
+        InputStream input = null;
         try {
             URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setDoInput(true);
             conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
+            conn.setReadTimeout(8000);
+            conn.setUseCaches(true);
+            conn.setInstanceFollowRedirects(true);
             conn.connect();
-            InputStream input = conn.getInputStream();
-            Bitmap bitmap = BitmapFactory.decodeStream(input);
-            input.close();
-            conn.disconnect();
-            return bitmap;
+            if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                return null;
+            }
+            input = conn.getInputStream();
+            return BitmapFactory.decodeStream(input);
         } catch (Exception e) {
+            Log.w(TAG, "downloadBitmap failed: " + e.getMessage());
             return null;
+        } finally {
+            if (input != null) {
+                try { input.close(); } catch (Exception ignored) {}
+            }
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -170,9 +211,44 @@ public class AudioForegroundService extends Service {
             public void onSkipToPrevious() {
                 sendCommandToWebView("prev");
             }
+
+            // #37: hardware media button support (headphones, bluetooth, car)
+            @Override
+            public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                if (mediaButtonIntent == null) return super.onMediaButtonEvent(mediaButtonIntent);
+                String action = mediaButtonIntent.getAction();
+                if (Intent.ACTION_MEDIA_BUTTON.equals(action)) {
+                    KeyEvent event = mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                    if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        int keyCode = event.getKeyCode();
+                        switch (keyCode) {
+                            case KeyEvent.KEYCODE_MEDIA_PLAY:
+                                onPlay();
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                                onPause();
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                            case KeyEvent.KEYCODE_HEADSETHOOK:
+                                if (isPlaying) onPause();
+                                else onPlay();
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_NEXT:
+                                onSkipToNext();
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                                onSkipToPrevious();
+                                return true;
+                        }
+                    }
+                }
+                return super.onMediaButtonEvent(mediaButtonIntent);
+            }
         });
     }
 
+    // #15: use elapsedRealtime so Android interpolates position smoothly
+    // between our (infrequent) sync calls — reduces wakeup cost.
     private void updateMediaSessionState() {
         long actions = PlaybackStateCompat.ACTION_PLAY
                 | PlaybackStateCompat.ACTION_PAUSE
@@ -181,8 +257,8 @@ public class AudioForegroundService extends Service {
                 | PlaybackStateCompat.ACTION_PLAY_PAUSE;
 
         int state = isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
-
         float speed = isPlaying ? 1.0f : 0.0f;
+
         mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
                 .setActions(actions)
                 .setState(state, currentPosition, speed, SystemClock.elapsedRealtime())
@@ -260,15 +336,32 @@ public class AudioForegroundService extends Service {
         return null;
     }
 
+    // #34: safe onDestroy — guarded unregister + executor shutdown
     @Override
     public void onDestroy() {
         if (noisyReceiver != null) {
-            unregisterReceiver(noisyReceiver);
+            try {
+                unregisterReceiver(noisyReceiver);
+            } catch (IllegalArgumentException e) {
+                Log.w(TAG, "noisyReceiver not registered", e);
+            }
             noisyReceiver = null;
         }
         if (mediaSession != null) {
-            mediaSession.setActive(false);
-            mediaSession.release();
+            try {
+                mediaSession.setActive(false);
+                mediaSession.release();
+            } catch (Exception e) {
+                Log.w(TAG, "mediaSession release failed", e);
+            }
+        }
+        // Don't fully shutdown the static executor — it is shared across service lifetimes.
+        // Just wait for in-flight tasks briefly.
+        try {
+            //noinspection ResultOfMethodCallIgnored
+            DOWNLOAD_EXECUTOR.awaitTermination(300, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();

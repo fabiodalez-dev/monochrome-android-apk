@@ -2,29 +2,31 @@ package com.monochrome.app;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.database.Cursor;
 import android.net.Uri;
-import android.provider.DocumentsContract;
-import android.provider.OpenableColumns;
-import android.util.Base64;
+import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 
 import androidx.documentfile.provider.DocumentFile;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Bridge for selecting and reading local music files on Android.
+ * Bridge for selecting local music folders on Android and exposing their
+ * content via content:// URIs (no base64 round-trip, zero OOM risk).
+ *
  * Accessible from JS as window.AndroidLocalFiles
  */
 public class LocalFilesBridge {
+
+    private static final String TAG = "LocalFilesBridge";
+    private static final int PICK_FOLDER_REQUEST = 42;
+    private static final int MAX_SCAN_DEPTH = 12; // Safety against symlink loops
+    private static final int BATCH_YIELD_MS = 20;
+
     private final Activity activity;
     private final WebView webView;
-    private static final int PICK_FOLDER_REQUEST = 42;
 
     public LocalFilesBridge(Activity activity, WebView webView) {
         this.activity = activity;
@@ -48,7 +50,10 @@ public class LocalFilesBridge {
 
     /**
      * Called from MainActivity.onActivityResult when folder is picked.
-     * Scans for audio files and sends them to JS one by one.
+     * Scans for audio files and streams their content:// URIs to JS.
+     *
+     * Post-optimization: files are NOT loaded into RAM here. The JS side
+     * receives the URI string and plays it directly via <audio src=content://>.
      */
     public void handleFolderResult(Uri treeUri) {
         new Thread(() -> {
@@ -60,58 +65,110 @@ public class LocalFilesBridge {
                 }
 
                 List<DocumentFile> audioFiles = new ArrayList<>();
-                scanForAudio(dir, audioFiles);
+                scanForAudio(dir, audioFiles, 0);
 
                 callJs("window._androidLocalFilesStart(" + audioFiles.size() + ")");
 
+                int failedCount = 0;
                 for (int i = 0; i < audioFiles.size(); i++) {
                     DocumentFile file = audioFiles.get(i);
                     try {
-                        InputStream is = activity.getContentResolver().openInputStream(file.getUri());
-                        if (is == null) continue;
-
-                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                        byte[] buffer = new byte[8192];
-                        int len;
-                        while ((len = is.read(buffer)) != -1) {
-                            baos.write(buffer, 0, len);
+                        String name = file.getName();
+                        if (name == null) {
+                            failedCount++;
+                            continue;
                         }
-                        is.close();
+                        Uri fileUri = file.getUri();
+                        if (fileUri == null) {
+                            failedCount++;
+                            continue;
+                        }
 
-                        String base64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
-                        String name = file.getName() != null ? file.getName() : "unknown";
-                        String safeName = name.replace("'", "\\'").replace("\\", "\\\\");
+                        // #45: correct escape order — backslash BEFORE apostrophe.
+                        String safeName = escapeJsString(name);
+                        String safeUri = escapeJsString(fileUri.toString());
 
-                        callJs("window._androidLocalFileReady('" + safeName + "','" + base64 + "'," + i + "," + audioFiles.size() + ")");
+                        callJs("window._androidLocalFileReady('"
+                                + safeName + "','"
+                                + safeUri + "',"
+                                + i + ","
+                                + audioFiles.size() + ")");
+
+                        // Yield periodically so the UI stays responsive
+                        if (i > 0 && i % 25 == 0) {
+                            try { Thread.sleep(BATCH_YIELD_MS); } catch (InterruptedException ignored) {}
+                        }
                     } catch (Exception e) {
-                        // Skip unreadable files
+                        failedCount++;
+                        Log.w(TAG, "Failed to enumerate file", e);
                     }
                 }
 
+                // #44: report partial failures to the user
+                if (failedCount > 0) {
+                    callJs("window._androidLocalFilesWarning(" + failedCount + ")");
+                }
                 callJs("window._androidLocalFilesDone()");
             } catch (Exception e) {
-                callJs("window._androidLocalFilesError('" + e.getMessage().replace("'", "\\'") + "')");
+                String msg = e.getMessage() != null ? e.getMessage() : "unknown error";
+                callJs("window._androidLocalFilesError('" + escapeJsString(msg) + "')");
             }
         }).start();
     }
 
-    private void scanForAudio(DocumentFile dir, List<DocumentFile> results) {
-        if (dir == null || !dir.isDirectory()) return;
-        for (DocumentFile file : dir.listFiles()) {
+    // #43: null-check getName() once per file (no TOCTOU).
+    // Depth-limited recursion guards against symlink loops.
+    private void scanForAudio(DocumentFile dir, List<DocumentFile> results, int depth) {
+        if (dir == null || !dir.isDirectory() || depth > MAX_SCAN_DEPTH) return;
+        DocumentFile[] children;
+        try {
+            children = dir.listFiles();
+        } catch (Exception e) {
+            Log.w(TAG, "listFiles failed", e);
+            return;
+        }
+        if (children == null) return;
+        for (DocumentFile file : children) {
+            if (file == null) continue;
             if (file.isDirectory()) {
-                scanForAudio(file, results);
-            } else if (file.isFile() && file.getName() != null) {
-                String name = file.getName().toLowerCase();
-                if (name.endsWith(".flac") || name.endsWith(".mp3") ||
-                        name.endsWith(".m4a") || name.endsWith(".wav") ||
-                        name.endsWith(".ogg")) {
+                scanForAudio(file, results, depth + 1);
+            } else if (file.isFile()) {
+                String name = file.getName();
+                if (name == null) continue;
+                String nameLower = name.toLowerCase();
+                if (nameLower.endsWith(".flac")
+                        || nameLower.endsWith(".mp3")
+                        || nameLower.endsWith(".m4a")
+                        || nameLower.endsWith(".wav")
+                        || nameLower.endsWith(".ogg")
+                        || nameLower.endsWith(".opus")
+                        || nameLower.endsWith(".aac")
+                        || nameLower.endsWith(".alac")) {
                     results.add(file);
                 }
             }
         }
     }
 
+    // #45: proper JS string escape — backslash first, then apostrophe, then newlines.
+    private static String escapeJsString(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\u2028", "\\u2028")
+                .replace("\u2029", "\\u2029");
+    }
+
     private void callJs(String js) {
-        activity.runOnUiThread(() -> webView.evaluateJavascript(js, null));
+        activity.runOnUiThread(() -> {
+            try {
+                webView.evaluateJavascript(js, null);
+            } catch (Exception e) {
+                Log.w(TAG, "evaluateJavascript failed", e);
+            }
+        });
     }
 }

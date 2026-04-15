@@ -14,6 +14,7 @@ import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Base64;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
@@ -28,11 +29,17 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 @CapacitorPlugin(name = "AudioService")
 public class AudioServicePlugin extends Plugin {
 
+    private static final String TAG = "AudioServicePlugin";
+    private static final String DOWNLOAD_CHANNEL_ID = "fabiodalez_downloads";
+    // #47: single reusable notification ID — replaces previous instead of accumulating
+    private static final int DOWNLOAD_NOTIF_ID = 999;
+    // #36: create channel once, guarded by this flag
+    private static volatile boolean downloadChannelCreated = false;
+
     private BroadcastReceiver mediaCommandReceiver;
 
     @Override
     public void load() {
-        // Listen for media commands from the foreground service
         mediaCommandReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -59,8 +66,8 @@ public class AudioServicePlugin extends Plugin {
         String text = call.getString("text", "Playing music");
         String cover = call.getString("cover", null);
         Boolean playing = call.getBoolean("playing", true);
-        long position = call.getData().optLong("position", 0L);
-        long duration = call.getData().optLong("duration", 0L);
+        long position = Math.max(0L, call.getData().optLong("position", 0L));
+        long duration = Math.max(0L, call.getData().optLong("duration", 0L));
 
         Intent intent = new Intent(getContext(), AudioForegroundService.class);
         intent.putExtra("title", title);
@@ -81,7 +88,6 @@ public class AudioServicePlugin extends Plugin {
 
     @PluginMethod()
     public void stop(PluginCall call) {
-        // Don't stop the service — just update state to paused
         Intent intent = new Intent(getContext(), AudioForegroundService.class);
         intent.putExtra("playing", false);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -97,7 +103,7 @@ public class AudioServicePlugin extends Plugin {
         JSObject result = new JSObject();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
-            boolean isOptimized = !pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+            boolean isOptimized = pm != null && !pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
             result.put("optimized", isOptimized);
         } else {
             result.put("optimized", false);
@@ -109,11 +115,15 @@ public class AudioServicePlugin extends Plugin {
     public void requestBatteryExclusion(PluginCall call) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
-            if (!pm.isIgnoringBatteryOptimizations(getContext().getPackageName())) {
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getContext().getPackageName())) {
                 Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
                 intent.setData(Uri.parse("package:" + getContext().getPackageName()));
                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                getContext().startActivity(intent);
+                try {
+                    getContext().startActivity(intent);
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to launch battery exclusion intent", e);
+                }
             }
         }
         call.resolve();
@@ -133,10 +143,10 @@ public class AudioServicePlugin extends Plugin {
             String base64Data = dataUri.substring(dataUri.indexOf(",") + 1);
             byte[] data = Base64.decode(base64Data, Base64.DEFAULT);
 
-            // Detect MIME type from data URI
             String mimeType = "application/octet-stream";
             if (dataUri.startsWith("data:")) {
-                mimeType = dataUri.substring(5, dataUri.indexOf(";"));
+                int semi = dataUri.indexOf(";");
+                if (semi > 5) mimeType = dataUri.substring(5, semi);
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -148,21 +158,24 @@ public class AudioServicePlugin extends Plugin {
                 Uri uri = getContext().getContentResolver().insert(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
                 if (uri != null) {
-                    OutputStream os = getContext().getContentResolver().openOutputStream(uri);
-                    if (os != null) {
-                        os.write(data);
-                        os.close();
+                    try (OutputStream os = getContext().getContentResolver().openOutputStream(uri)) {
+                        if (os != null) {
+                            os.write(data);
+                        }
                     }
                 }
             } else {
                 java.io.File dir = new java.io.File(
                         Environment.getExternalStoragePublicDirectory(
                                 Environment.DIRECTORY_DOWNLOADS), "FabiodalezMusic");
-                dir.mkdirs();
-                java.io.FileOutputStream fos = new java.io.FileOutputStream(
-                        new java.io.File(dir, filename));
-                fos.write(data);
-                fos.close();
+                if (!dir.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    dir.mkdirs();
+                }
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(
+                        new java.io.File(dir, filename))) {
+                    fos.write(data);
+                }
             }
 
             showDownloadNotification(filename, true);
@@ -173,38 +186,51 @@ public class AudioServicePlugin extends Plugin {
         }
     }
 
-    private int downloadNotifId = 100;
+    // #36: create notification channel only once
+    private void createDownloadChannelIfNeeded() {
+        if (downloadChannelCreated) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                NotificationChannel channel = new NotificationChannel(
+                        DOWNLOAD_CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW);
+                channel.setDescription("File download notifications");
+                nm.createNotificationChannel(channel);
+            }
+        }
+        downloadChannelCreated = true;
+    }
 
     private void showDownloadNotification(String filename, boolean success) {
-        String channelId = "fabiodalez_downloads";
+        createDownloadChannelIfNeeded();
         NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    channelId, "Downloads", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("File download notifications");
-            nm.createNotificationChannel(channel);
-        }
+        if (nm == null) return;
 
         String title = success ? "Download complete" : "Download failed";
         String text = success
                 ? filename + " saved to Downloads/FabiodalezMusic"
                 : "Failed to save " + filename;
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), channelId)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), DOWNLOAD_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT);
 
-        nm.notify(downloadNotifId++, builder.build());
+        // #47: reuse same ID — replaces previous notification, no tray accumulation
+        nm.notify(DOWNLOAD_NOTIF_ID, builder.build());
     }
 
     @Override
     protected void handleOnDestroy() {
         if (mediaCommandReceiver != null) {
-            getContext().unregisterReceiver(mediaCommandReceiver);
+            try {
+                getContext().unregisterReceiver(mediaCommandReceiver);
+            } catch (IllegalArgumentException e) {
+                Log.w(TAG, "mediaCommandReceiver not registered", e);
+            }
+            mediaCommandReceiver = null;
         }
     }
 }
