@@ -31,9 +31,10 @@ cp "$SCRIPT_DIR/build-android.sh" "$TARGET/"
 cp "$SCRIPT_DIR/capacitor.config.ts" "$TARGET/"
 chmod +x "$TARGET/build-android.sh"
 
-# Copy android-service.js
+# Copy wrapper JS files
 mkdir -p "$TARGET/android"
 cp "$SCRIPT_DIR/android/android-service.js" "$TARGET/android/"
+cp "$SCRIPT_DIR/android/fm-logger.js" "$TARGET/android/"
 
 # Copy Java sources
 JAVA_DEST="$TARGET/android/app/src/main/java/com/monochrome/app"

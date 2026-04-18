@@ -3,6 +3,26 @@
 // Injected into the Monochrome web app at build time.
 // ═══════════════════════════════════════════════════════════════════
 
+// (fm-logger.js is loaded separately in <head> as a synchronous script
+//  so it captures ALL console output from the very start, before any module.)
+
+// ── UNREGISTER SERVICE WORKER ──
+// The upstream workbox SW uses CacheFirst for audio/video, but Tidal CDN
+// streams don't serve CORS headers → workbox can't read the response →
+// "no-response" error → audio won't play. The Android WebView already has
+// its own HTTP cache (configured in MainActivity), so we don't need SW at all.
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then((regs) => {
+        regs.forEach((r) => r.unregister());
+    }).catch(() => {});
+    // Also clear the SW cache storage so stale entries don't linger
+    if (typeof caches !== 'undefined') {
+        caches.keys().then((names) => {
+            names.forEach((name) => caches.delete(name));
+        }).catch(() => {});
+    }
+}
+
 // ── CLIPBOARD FALLBACK ──
 if (window.AndroidBridge) {
     const origClipboard = navigator.clipboard?.writeText?.bind(navigator.clipboard);

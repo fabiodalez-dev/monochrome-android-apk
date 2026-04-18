@@ -36,6 +36,7 @@ cleanup() {
     for f in \
         index.html \
         package.json \
+        vite.config.ts \
         js/app.js \
         js/api.js \
         js/cache.js \
@@ -46,7 +47,7 @@ cleanup() {
         fi
     done
     # Untracked files we generated during the build
-    rm -f js/android-service.js package-lock.json
+    rm -f js/android-service.js js/fm-logger.js package-lock.json
     rm -rf node_modules/@capgo/capacitor-media-session 2>/dev/null || true
     echo "  ✓ Source restored to upstream."
 }
@@ -118,11 +119,13 @@ echo "  ✓ @capgo/capacitor-media-session shimmed (no-op → our AudioForegroun
 echo ""
 echo "▶ Patching for Android build..."
 
-# 3a. Add script tag
+# 3a. Add script tags
+# Logger FIRST (synchronous, non-module) in <head> — captures ALL console output from start
+sed -i '' 's|</head>|<script src="./js/fm-logger.js"></script></head>|' index.html
+# Service JS LAST (module) in <body> — loads after DOM
 sed -i '' 's|</body>|<script type="module" src="./js/android-service.js"></script></body>|' index.html
 
-# 3b. (upstream already has viewport-fit=cover — previous pinch-zoom-disable
-#      sed was a noop and removed; rely on meta viewport as upstream ships it.)
+# 3b. (workbox audio/video CacheFirst → NetworkOnly is patched via Python below)
 
 # 3c. Brand: "Monochrome" → "Fabiodalez" in sidebar logo
 sed -i '' 's|<span>Monochrome</span>|<span>Fabiodalez</span>|' index.html
@@ -350,14 +353,25 @@ try:
 except Exception as e:
     print("  ! api.js: searchArtists patch failed: " + str(e))
 
+# ── Workbox: CacheFirst → NetworkOnly for audio/video ──
+# Tidal CDN streams don't serve CORS headers → CacheFirst fails with
+# "no-response" in the service worker → audio won't play.
+patch(
+    "vite.config.ts",
+    "handler: 'CacheFirst',\n                            options: {\n                                cacheName: 'media',",
+    "handler: 'NetworkOnly',\n                            options: {\n                                cacheName: 'media',",
+    "vite.config.ts: workbox audio/video CacheFirst -> NetworkOnly",
+)
+
 print("  ✓ Upstream JS optimizations applied.")
 PYEOF
 
 echo "  ✓ JS upstream optimizations applied (debounce, cache, limits)."
 
-# ── 4. Copy android-service.js from android/ storage ──
+# ── 4. Copy wrapper JS files from android/ storage ──
 cp "$PROJECT_DIR/android/android-service.js" js/android-service.js
-echo "  ✓ android-service.js copied."
+cp "$PROJECT_DIR/android/fm-logger.js" js/fm-logger.js
+echo "  ✓ android-service.js + fm-logger.js copied."
 
 # ── 5. Init Capacitor Android if needed ──
 if [ ! -d "$PROJECT_DIR/android" ]; then
