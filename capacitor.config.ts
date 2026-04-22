@@ -4,9 +4,14 @@ const config: CapacitorConfig = {
     appId: 'com.monochrome.app',
     appName: 'Fabiodalez Music',
     webDir: 'dist',
+    // Use monochrome.tf as the WebView origin so that Tidal API proxies
+    // and CDN accept our requests (they reject Origin: https://localhost).
+    server: {
+        hostname: 'monochrome.tf',
+        androidScheme: 'https',
+    },
     android: {
         adjustMarginsForEdgeToEdge: 'auto',
-        // Keep WebView HTTP connections alive between fetches (reduces TCP handshake churn).
         allowMixedContent: false,
     },
     plugins: {

@@ -6,16 +6,30 @@
 // (fm-logger.js is loaded separately in <head> as a synchronous script
 //  so it captures ALL console output from the very start, before any module.)
 
+// ── TIDAL ORIGIN BYPASS ──
+// Tell the upstream proxy-utils.js that we handle the Origin header natively
+// (via TidalWebViewClient.java), so it should use direct CDN URLs instead of
+// routing through audio-proxy.binimum.org (which is often down/403).
+// This is the same flag the Chrome extension "Monochrome Tidal Bypass" sets.
+window.__tidalOriginExtension = true;
+
 // ── UNREGISTER SERVICE WORKER ──
 // The upstream workbox SW uses CacheFirst for audio/video, but Tidal CDN
 // streams don't serve CORS headers → workbox can't read the response →
 // "no-response" error → audio won't play. The Android WebView already has
 // its own HTTP cache (configured in MainActivity), so we don't need SW at all.
 if ('serviceWorker' in navigator) {
+    // 1. Deregister any existing service worker
     navigator.serviceWorker.getRegistrations().then((regs) => {
         regs.forEach((r) => r.unregister());
     }).catch(() => {});
-    // Also clear the SW cache storage so stale entries don't linger
+    // 2. Block future registrations — upstream VitePWA calls registerSW()
+    //    which would re-register the SW after our deregister, causing a race
+    //    condition where the SW intercepts audio fetches and breaks playback.
+    navigator.serviceWorker.register = function () {
+        return Promise.resolve({ unregister: function () { return Promise.resolve(true); } });
+    };
+    // 3. Clear SW cache storage
     if (typeof caches !== 'undefined') {
         caches.keys().then((names) => {
             names.forEach((name) => caches.delete(name));

@@ -1,5 +1,22 @@
 // fm-logger.js — Console logger to file (loaded FIRST, before any other scripts)
 // Saves all console output to Downloads/FabiodalezMusic/fm-console-log.txt
+
+// Tell upstream we handle Tidal Origin natively — skip audio-proxy.binimum.org.
+window.__tidalOriginExtension = true;
+
+// Block Service Worker registration IMMEDIATELY (before any other script runs).
+// The upstream VitePWA plugin registers a SW that uses CacheFirst for audio,
+// which breaks Tidal streaming due to CORS. Must be blocked here (earliest
+// possible point) to prevent the race condition on fresh installs.
+if (navigator.serviceWorker) {
+    navigator.serviceWorker.register = function () {
+        return Promise.resolve({ unregister: function () { return Promise.resolve(true); } });
+    };
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+    }).catch(function () {});
+}
+
 (function () {
     var _logBuffer = [];
     var _MAX = 3000;

@@ -41,6 +41,9 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         // ── #32: WebView hardening (cache, DOM storage, text zoom, media playback) ──
+        // Enable Chrome remote debugging (chrome://inspect on desktop)
+        WebView.setWebContentsDebuggingEnabled(true);
+
         try {
             WebView webView = getBridge().getWebView();
             WebSettings settings = webView.getSettings();
@@ -64,6 +67,12 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception e) {
             Log.w(TAG, "WebView hardening skipped", e);
         }
+
+        // ── Tidal CDN Origin fix ──
+        // Use custom WebViewClient that proxies Tidal audio requests with
+        // Origin: https://listen.tidal.com (same as the Chrome extension).
+        // Extends BridgeWebViewClient so Capacitor's bridge still works.
+        getBridge().setWebViewClient(new TidalWebViewClient(getBridge()));
 
         // Register bridges
         getBridge().getWebView().addJavascriptInterface(

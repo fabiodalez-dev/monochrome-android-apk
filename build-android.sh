@@ -41,6 +41,7 @@ cleanup() {
         js/api.js \
         js/cache.js \
         js/ui.js \
+        js/storage.js \
         android/app/src/main/java/tf/monochrome/music/BackgroundAudioPlugin.java
     do
         if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
@@ -165,6 +166,31 @@ def patch(path, before, after, label):
         f.write(src)
     print("  + " + label)
     return True
+
+# ── #53: Add working streaming instance to fallback list ──
+# The hardcoded fallback in storage.js doesn't include frankfurt-2.monochrome.tf,
+# which is often the ONLY working streaming proxy. On a fresh install where the
+# uptime worker fetch fails, all hardcoded instances return 403 → no playback.
+patch(
+    "js/storage.js",
+    """                    streaming: [
+                        { url: 'https://hifi.geeked.wtf', version: '2.7' },""",
+    """                    streaming: [
+                        { url: 'https://frankfurt-2.monochrome.tf', version: '2.10' },
+                        { url: 'https://hifi.geeked.wtf', version: '2.7' },""",
+    "storage.js: add frankfurt-2 to streaming fallback",
+)
+
+# ── #54: Always try native HiFiClient for streaming (not just proxies) ──
+# The upstream code skips HiFiClient for streaming requests (type='streaming')
+# and goes straight to proxy instances. But when ALL proxies are down/403,
+# there's no fallback. Force shouldTryNative=true so HiFiClient is tried first.
+patch(
+    "js/api.js",
+    "        const shouldTryNative = type !== 'streaming';",
+    "        const shouldTryNative = true; // patched: always try native, including streaming",
+    "api.js: force native HiFiClient for streaming",
+)
 
 # ── #1 + #2: debounce + min-chars REMOVED ──
 # The upstream 3000ms debounce works fine in practice — it lets users finish
